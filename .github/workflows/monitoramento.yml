@@ -1,0 +1,143 @@
+name: Sorteio Monitor do Cycle
+
+on:
+  # Agendamento: toda segunda às 07:00 UTC (04:00 BRT). O guard abaixo só deixa
+  # seguir nas segundas em que começa um novo Cycle (a cada 14 dias a partir de
+  # CYCLE_ANCHOR). O step de espera segura o post até POST_TIME.
+  schedule:
+    - cron: "0 7 * * 1"
+  # Disparo manual (Actions → Sorteio Monitor do Cycle → Run workflow).
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Sortear agora, mesmo fora da segunda de início de Cycle"
+        type: boolean
+        default: false
+
+# Secret necessário:
+#   SLACK_WEBHOOK_URL_MONITORAMENTO  → webhook do canal #alertas-criticos
+
+env:
+  CYCLE_ANCHOR: "2026-10-12"   # uma segunda-feira em que um Cycle começou
+  CYCLE_DAYS: "14"
+  POST_TIME: "09:00"           # horário alvo em America/Sao_Paulo
+  TEAM_FILE: "teams/monitoramento.txt"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sorteio-monitoramento
+  cancel-in-progress: false
+
+jobs:
+  sorteio:
+    name: Draw & Post
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard - início de Cycle e não sorteado ainda
+        id: guard
+        env:
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: |
+          export TZ=America/Sao_Paulo
+          TODAY=$(date +%F)
+          DAYS=$(( ( $(date -d "$TODAY" +%s) - $(date -d "$CYCLE_ANCHOR" +%s) ) / 86400 ))
+          OFFSET=$(( ((DAYS % CYCLE_DAYS) + CYCLE_DAYS) % CYCLE_DAYS ))
+          CYCLE_START=$(date -d "$TODAY - $OFFSET days" +%F)
+          # Fim exibido = último dia útil antes do próximo Cycle (sexta)
+          CYCLE_END=$(date -d "$CYCLE_START + $(( CYCLE_DAYS - 3 )) days" +%F)
+          echo "Agora em SP: $(date '+%a %d/%m %H:%M') | Cycle atual: $CYCLE_START → $CYCLE_END"
+          {
+            echo "cycle_start=$CYCLE_START"
+            echo "period=$(date -d "$CYCLE_START" +%d/%m) – $(date -d "$CYCLE_END" +%d/%m)"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$(cat .sorteio-state/last-cycle 2>/dev/null)" = "$CYCLE_START" ]; then
+            echo "Monitor do Cycle $CYCLE_START já sorteado. Encerrando."
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$FORCE" = "true" ]; then
+            echo "Execução manual forçada."
+            echo "skip=false" >> "$GITHUB_OUTPUT"; echo "wait=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$OFFSET" -ne 0 ]; then
+            echo "Hoje não é início de Cycle (dia $OFFSET de $CYCLE_DAYS). Encerrando."
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"; echo "wait=true" >> "$GITHUB_OUTPUT"
+
+      - name: Wait until POST_TIME
+        if: steps.guard.outputs.skip == 'false' && steps.guard.outputs.wait == 'true'
+        run: |
+          TARGET=$(TZ=America/Sao_Paulo date -d "today $POST_TIME" +%s)
+          DELTA=$(( TARGET - $(date +%s) ))
+          if [ "$DELTA" -gt 0 ]; then
+            echo "Dormindo ${DELTA}s ($((DELTA/60))min) até $POST_TIME BRT"
+            sleep "$DELTA"
+          else
+            echo "::warning::Scheduler atrasou $(( -DELTA / 60 ))min. Postando agora."
+          fi
+
+      - name: Re-check após o sleep
+        if: steps.guard.outputs.skip == 'false'
+        id: recheck
+        run: |
+          git fetch --quiet origin main
+          if git show origin/main:.sorteio-state/last-cycle 2>/dev/null | grep -qx "${{ steps.guard.outputs.cycle_start }}"; then
+            echo "::warning::Outra execução já sorteou este Cycle. Encerrando."
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git pull --rebase --autostash origin main
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Sortear monitor
+        if: steps.recheck.outputs.skip == 'false'
+        id: pick
+        run: echo "monitor=$(./sorteio.sh "$TEAM_FILE")" >> "$GITHUB_OUTPUT"
+
+      - name: Post no Slack - #alertas-criticos
+        if: steps.recheck.outputs.skip == 'false'
+        env:
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL_MONITORAMENTO }}
+          PERSON: ${{ steps.pick.outputs.monitor }}
+          PERIOD: ${{ steps.guard.outputs.period }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "::error::Secret SLACK_WEBHOOK_URL_MONITORAMENTO não configurado."; exit 1
+          fi
+          TEXT=$(cat <<MSG
+          :rotating_light: *Monitor do Cycle | ${PERIOD}*
+
+          Novo Cycle começando! Quem fica responsável pelo monitoramento neste ciclo é *${PERSON}* :mag:
+
+          *O que o monitor faz no Cycle:*
+          • Acompanha os serviços de forma exploratória (dashboards, logs, métricas)
+          • Detecta anomalias e comportamentos fora do padrão
+          • Responde e encaminha as notificações de alertas aqui no canal
+          • Apresenta as *3 principais anomalias do ciclo* no fechamento
+
+          Bom monitoramento! :muscle:
+          MSG
+          )
+          TEXT=$(printf '%s\n' "$TEXT" | sed 's/^          //')
+          PAYLOAD=$(jq -n --arg t "$TEXT" '{text:$t}')
+          curl -sS --fail-with-body -X POST \
+            -H 'Content-type: application/json; charset=utf-8' \
+            --data "$PAYLOAD" "$WEBHOOK"
+
+      - name: Persist state
+        if: steps.recheck.outputs.skip == 'false'
+        run: |
+          echo "${{ steps.guard.outputs.cycle_start }}" > .sorteio-state/last-cycle
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .sorteio-state/
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update sorteio-monitoramento state [skip ci]"
+            git pull --rebase --autostash origin main
+            git push origin main
+          fi
