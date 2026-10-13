@@ -1,7 +1,6 @@
 # Time Plus — participantes do sorteio de monitor do Cycle
 # Um participante por linha. Linhas começando com # são ignoradas.
 Luís
-Eder
 Carletto
 Beatriz
 Victhor
