@@ -13,6 +13,10 @@ on:
         description: "Sortear agora, mesmo fora da segunda de início de Cycle"
         type: boolean
         default: false
+      rerun:
+        description: "Refazer o sorteio do Cycle atual, mesmo que já tenha sido sorteado (hoje ou antes)"
+        type: boolean
+        default: false
 
 # Secret necessário:
 #   SLACK_WEBHOOK_URL_MONITORAMENTO  → webhook do canal #alertas-criticos
@@ -37,11 +41,14 @@ jobs:
     timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # histórico necessário para desfazer o sorteio anterior no rerun
 
       - name: Guard - início de Cycle e não sorteado ainda
         id: guard
         env:
           FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+          RERUN: ${{ github.event_name == 'workflow_dispatch' && inputs.rerun }}
         run: |
           export TZ=America/Sao_Paulo
           TODAY=$(date +%F)
@@ -57,10 +64,16 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           if [ "$(cat .sorteio-state/last-cycle 2>/dev/null)" = "$CYCLE_START" ]; then
-            echo "Monitor do Cycle $CYCLE_START já sorteado. Encerrando."
+            if [ "$RERUN" = "true" ]; then
+              echo "Monitor do Cycle $CYCLE_START já sorteado, mas rerun marcado. Refazendo o sorteio."
+              echo "rerun=true" >> "$GITHUB_OUTPUT"
+              echo "skip=false" >> "$GITHUB_OUTPUT"; echo "wait=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            echo "Monitor do Cycle $CYCLE_START já sorteado. Encerrando (marque 'rerun' para refazer)."
             echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if [ "$FORCE" = "true" ]; then
+          echo "rerun=false" >> "$GITHUB_OUTPUT"
+          if [ "$FORCE" = "true" ] || [ "$RERUN" = "true" ]; then
             echo "Execução manual forçada."
             echo "skip=false" >> "$GITHUB_OUTPUT"; echo "wait=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
@@ -87,12 +100,30 @@ jobs:
         id: recheck
         run: |
           git fetch --quiet origin main
-          if git show origin/main:.sorteio-state/last-cycle 2>/dev/null | grep -qx "${{ steps.guard.outputs.cycle_start }}"; then
+          if [ "${{ steps.guard.outputs.rerun }}" != "true" ] && \
+             git show origin/main:.sorteio-state/last-cycle 2>/dev/null | grep -qx "${{ steps.guard.outputs.cycle_start }}"; then
             echo "::warning::Outra execução já sorteou este Cycle. Encerrando."
             echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           git pull --rebase --autostash origin main
           echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      # No rerun, volta o estado da rodada para antes do sorteio deste Cycle, para
+      # que quem foi sorteado volte para a lista e ninguém seja "pulado" na rodada.
+      - name: Desfazer sorteio anterior do Cycle (rerun)
+        if: steps.recheck.outputs.skip == 'false' && steps.guard.outputs.rerun == 'true'
+        run: |
+          STATE_DIR=".sorteio-state/$(basename "$TEAM_FILE" .txt)"
+          SHA=$(git log -1 --format=%H -- .sorteio-state/last-cycle)
+          echo "Sorteio anterior: $(cat "$STATE_DIR/last.txt" 2>/dev/null) (commit $SHA)"
+          if git cat-file -e "$SHA^:$STATE_DIR" 2>/dev/null; then
+            rm -rf "$STATE_DIR"
+            git checkout "$SHA^" -- "$STATE_DIR"
+          else
+            # Era o primeiro sorteio: a rodada recomeça com todos os participantes
+            rm -f "$STATE_DIR/remaining.txt" "$STATE_DIR/last.txt"
+          fi
+          echo "Estado restaurado. Faltam na rodada:"; cat "$STATE_DIR/remaining.txt" 2>/dev/null || echo "(todos)"
 
       - name: Sortear monitor
         if: steps.recheck.outputs.skip == 'false'
@@ -105,6 +136,7 @@ jobs:
           WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL_MONITORAMENTO }}
           PERSON: ${{ steps.pick.outputs.monitor }}
           PERIOD: ${{ steps.guard.outputs.period }}
+          RERUN: ${{ steps.guard.outputs.rerun }}
         run: |
           if [ -z "$WEBHOOK" ]; then
             echo "::error::Secret SLACK_WEBHOOK_URL_MONITORAMENTO não configurado."; exit 1
@@ -124,6 +156,9 @@ jobs:
           MSG
           )
           TEXT=$(printf '%s\n' "$TEXT" | sed 's/^          //')
+          if [ "$RERUN" = "true" ]; then
+            TEXT=$(printf ':repeat: _Sorteio refeito: esta mensagem substitui a anterior._\n\n%s' "$TEXT")
+          fi
           PAYLOAD=$(jq -n --arg t "$TEXT" '{text:$t}')
           curl -sS --fail-with-body -X POST \
             -H 'Content-type: application/json; charset=utf-8' \
@@ -137,7 +172,11 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .sorteio-state/
           if ! git diff --cached --quiet; then
-            git commit -m "chore: update sorteio-monitoramento state [skip ci]"
+            if [ "${{ steps.guard.outputs.rerun }}" = "true" ]; then
+              git commit -m "chore: refaz sorteio-monitoramento do Cycle ${{ steps.guard.outputs.cycle_start }} [skip ci]"
+            else
+              git commit -m "chore: update sorteio-monitoramento state [skip ci]"
+            fi
             git pull --rebase --autostash origin main
             git push origin main
           fi

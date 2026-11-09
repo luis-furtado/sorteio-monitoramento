@@ -29,7 +29,10 @@ sorteio-monitoramento/
 
 ## Disparo manual
 
-*Actions → Sorteio Monitor do Cycle → Run workflow*. Marque **force** para sortear na hora o monitor do Cycle em andamento (útil se o agendamento falhar ou no primeiro uso). Se o Cycle atual já tiver monitor, o workflow não sorteia de novo.
+*Actions → Sorteio Monitor do Cycle → Run workflow*.
+
+- **force**: sorteia na hora o monitor do Cycle em andamento, mesmo fora da segunda de início (útil se o agendamento falhar ou no primeiro uso). Se o Cycle atual já tiver monitor, não sorteia de novo.
+- **rerun**: refaz o sorteio do Cycle atual mesmo que ele já tenha sido sorteado (no mesmo dia ou antes). O estado da rodada volta para antes do sorteio anterior, então quem tinha sido sorteado volta para a lista e pode sair de novo. O post no Slack sai na hora, sinalizado como sorteio refeito.
 
 ## Secret necessário
 
