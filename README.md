@@ -32,7 +32,7 @@ sorteio-monitoramento/
 *Actions → Sorteio Monitor do Cycle → Run workflow*.
 
 - **force**: sorteia na hora o monitor do Cycle em andamento, mesmo fora da segunda de início (útil se o agendamento falhar ou no primeiro uso). Se o Cycle atual já tiver monitor, não sorteia de novo.
-- **rerun**: refaz o sorteio do Cycle atual mesmo que ele já tenha sido sorteado (no mesmo dia ou antes). O estado da rodada volta para antes do sorteio anterior, então quem tinha sido sorteado volta para a lista e pode sair de novo. O post no Slack sai na hora, sinalizado como sorteio refeito.
+- **rerun**: refaz o sorteio do Cycle atual mesmo que ele já tenha sido sorteado (no mesmo dia ou antes). O estado da rodada volta para antes do sorteio anterior, e quem já foi sorteado neste Cycle não pode sair de novo (fica em `.sorteio-state/rerun-excluded.txt` e volta para a lista da rodada, para ser sorteado num Cycle seguinte). O post no Slack sai na hora, sinalizado como sorteio refeito.
 
 ## Secret necessário
 

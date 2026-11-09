@@ -10,6 +10,10 @@ set -euo pipefail
 # Estado (por time, em <state_dir>):
 #   remaining.txt  quem ainda não foi sorteado na rodada atual
 #   last.txt       último sorteado
+#
+# Opcional: EXCLUDE (env, um nome por linha) tira essas pessoas dos candidatos,
+# desde que sobre alguém na rodada. Usado pelo rerun para não repetir quem já
+# foi sorteado no mesmo Cycle.
 
 MEMBERS_FILE="${1:?Informe o arquivo de participantes. Ex: ./sorteio.sh teams/monitoramento.txt}"
 [[ -f "$MEMBERS_FILE" ]] || { echo "Arquivo não encontrado: $MEMBERS_FILE" >&2; exit 1; }
@@ -30,11 +34,22 @@ grep -F -x -f <(load_members) "$REMAINING" > "${REMAINING}.tmp" || true
 mv "${REMAINING}.tmp" "$REMAINING"
 [[ -s "$REMAINING" ]] || load_members > "$REMAINING"
 
+# Remove os excluídos (rerun), se ainda sobrar alguém
+BASE="$(cat "$REMAINING")"
+if [[ -n "${EXCLUDE:-}" ]]; then
+  FILTERED="$(printf '%s\n' "$BASE" | grep -v -F -x -f <(printf '%s\n' "$EXCLUDE") || true)"
+  if [[ -n "$FILTERED" ]]; then
+    BASE="$FILTERED"
+  else
+    echo "Aviso: todos que faltam na rodada estão em EXCLUDE; ignorando a exclusão." >&2
+  fi
+fi
+
 # Evita repetir o último sorteado quando houver outra opção
-CANDIDATES="$(cat "$REMAINING")"
-if [[ -s "$LAST" ]] && [[ "$(wc -l < "$REMAINING")" -gt 1 ]]; then
-  CANDIDATES="$(grep -v -F -x "$(cat "$LAST")" "$REMAINING" || true)"
-  [[ -n "$CANDIDATES" ]] || CANDIDATES="$(cat "$REMAINING")"
+CANDIDATES="$BASE"
+if [[ -s "$LAST" ]] && [[ "$(printf '%s\n' "$BASE" | wc -l)" -gt 1 ]]; then
+  CANDIDATES="$(printf '%s\n' "$BASE" | grep -v -F -x "$(cat "$LAST")" || true)"
+  [[ -n "$CANDIDATES" ]] || CANDIDATES="$BASE"
 fi
 
 SORTEADO="$(printf '%s\n' "$CANDIDATES" | shuf -n 1)"

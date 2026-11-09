@@ -110,12 +110,24 @@ jobs:
 
       # No rerun, volta o estado da rodada para antes do sorteio deste Cycle, para
       # que quem foi sorteado volte para a lista e ninguém seja "pulado" na rodada.
+      # Quem já foi sorteado neste Cycle fica em .sorteio-state/rerun-excluded.txt
+      # (1ª linha = Cycle) e não pode sair de novo nos reruns do mesmo Cycle.
       - name: Desfazer sorteio anterior do Cycle (rerun)
         if: steps.recheck.outputs.skip == 'false' && steps.guard.outputs.rerun == 'true'
         run: |
           STATE_DIR=".sorteio-state/$(basename "$TEAM_FILE" .txt)"
           SHA=$(git log -1 --format=%H -- .sorteio-state/last-cycle)
-          echo "Sorteio anterior: $(cat "$STATE_DIR/last.txt" 2>/dev/null) (commit $SHA)"
+          CYCLE="${{ steps.guard.outputs.cycle_start }}"
+          EXC=.sorteio-state/rerun-excluded.txt
+          PREV=$(cat "$STATE_DIR/last.txt" 2>/dev/null || true)
+          echo "Sorteio anterior: $PREV (commit $SHA)"
+          {
+            echo "$CYCLE"
+            if [ "$(head -n 1 "$EXC" 2>/dev/null)" = "$CYCLE" ]; then tail -n +2 "$EXC"; fi
+            if [ -n "$PREV" ]; then echo "$PREV"; fi
+          } | awk 'NR==1 || !seen[$0]++' > "$EXC.tmp"
+          mv "$EXC.tmp" "$EXC"
+          echo "Excluídos deste Cycle: $(tail -n +2 "$EXC" | paste -sd, -)"
           if git cat-file -e "$SHA^:$STATE_DIR" 2>/dev/null; then
             rm -rf "$STATE_DIR"
             git checkout "$SHA^" -- "$STATE_DIR"
@@ -128,7 +140,12 @@ jobs:
       - name: Sortear monitor
         if: steps.recheck.outputs.skip == 'false'
         id: pick
-        run: echo "monitor=$(./sorteio.sh "$TEAM_FILE")" >> "$GITHUB_OUTPUT"
+        env:
+          RERUN: ${{ steps.guard.outputs.rerun }}
+        run: |
+          EXCLUDE=""
+          if [ "$RERUN" = "true" ]; then EXCLUDE=$(tail -n +2 .sorteio-state/rerun-excluded.txt); fi
+          echo "monitor=$(EXCLUDE="$EXCLUDE" ./sorteio.sh "$TEAM_FILE")" >> "$GITHUB_OUTPUT"
 
       - name: Post no Slack - #alertas-criticos
         if: steps.recheck.outputs.skip == 'false'
@@ -168,6 +185,8 @@ jobs:
         if: steps.recheck.outputs.skip == 'false'
         run: |
           echo "${{ steps.guard.outputs.cycle_start }}" > .sorteio-state/last-cycle
+          # Sorteio normal de um novo Cycle: limpa as exclusões do Cycle anterior
+          if [ "${{ steps.guard.outputs.rerun }}" != "true" ]; then rm -f .sorteio-state/rerun-excluded.txt; fi
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .sorteio-state/
